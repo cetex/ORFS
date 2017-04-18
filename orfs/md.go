@@ -1,4 +1,4 @@
-package ORFS
+package orfs
 
 import (
 	"fmt"
