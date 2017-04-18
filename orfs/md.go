@@ -13,7 +13,7 @@ import (
 
 type md struct {
 	ioctx *rados.IOContext
-	cache map[string]map[string]cephStat
+	cache map[string]map[string]Stat
 }
 
 // Encode entry v into b as LittleEndian, starting from position p
@@ -45,7 +45,7 @@ func PutUint16(b []byte, v uint16, p int) {
 	b[1+p] = byte(v >> 8)
 }
 
-func makeMdEntry(state byte, f cephStat) []byte {
+func makeMdEntry(state byte, f Stat) []byte {
 	nLength := len(f.name)
 	entry := make([]byte, 23+nLength)
 	// write out state first.
@@ -65,7 +65,7 @@ func makeMdEntry(state byte, f cephStat) []byte {
 	return entry
 }
 
-func parseMdEntry(entry []byte) (byte, *cephStat, error) {
+func parseMdEntry(entry []byte) (byte, *Stat, error) {
 	// Entry looks like:
 	// add(+)/remove(-) uint64(size of file) int64(modTime seconds) int32(modTime nanoSeconds) length(of filename) []byte(<filename>) uint16(checksum)
 	// [+-]int16<file>uint64int64int32
@@ -86,7 +86,7 @@ func parseMdEntry(entry []byte) (byte, *cephStat, error) {
 		return 0, nil, fmt.Errorf("DecodeError: Metadata CRC error")
 	}
 
-	f := cephStat{
+	f := Stat{
 		name:    name,
 		size:    int64(size),
 		mode:    os.FileMode(644),
@@ -96,7 +96,7 @@ func parseMdEntry(entry []byte) (byte, *cephStat, error) {
 	return state, &f, nil
 }
 
-func readMD(name string) (*[]cephStat, error) {
+func readMD(name string) (*[]Stat, error) {
 	if name == "" {
 		name = "root/"
 	}

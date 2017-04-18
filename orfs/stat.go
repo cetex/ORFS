@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-type cephStat struct {
+type Stat struct {
 	name     string
 	size     int64
 	mode     os.FileMode
@@ -15,26 +15,26 @@ type cephStat struct {
 	statDone bool
 }
 
-func (s *cephStat) Name() string {
+func (s *Stat) Name() string {
 	return s.name
 }
 
-func (s *cephStat) Size() int64 {
+func (s *Stat) Size() int64 {
 	return s.size
 }
 
-func (s *cephStat) Mode() os.FileMode {
+func (s *Stat) Mode() os.FileMode {
 	return s.mode
 }
 
-func (s *cephStat) ModTime() time.Time {
+func (s *Stat) ModTime() time.Time {
 	return s.modTime
 }
 
-func (s *cephStat) IsDir() bool {
+func (s *Stat) IsDir() bool {
 	return s.isDir
 }
 
-func (s *cephStat) Sys() interface{} {
+func (s *Stat) Sys() interface{} {
 	return s.sys
 }

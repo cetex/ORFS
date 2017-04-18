@@ -9,13 +9,13 @@ import (
 	"time"
 )
 
-type orfsFile struct {
+type File struct {
 	oid  string
 	pos  uint64
-	orfs *orfs
+	orfs *Orfs
 }
 
-func (f *orfsFile) Close() error {
+func (f *File) Close() error {
 	fmt.Fprintf(f.orfs.debuglog, "Close: %v\n", f.oid)
 	f.oid = ""
 	f.pos = 0
@@ -23,14 +23,14 @@ func (f *orfsFile) Close() error {
 	return nil
 }
 
-func (f *orfsFile) Read(p []byte) (int, error) {
+func (f *File) Read(p []byte) (int, error) {
 	fmt.Fprintf(f.orfs.debuglog, "Read: %v\n", f.oid)
 	read, err := f.orfs.ioctx.Read(f.oid, p, f.pos)
 	f.pos += uint64(read)
 	return read, err
 }
 
-func (f *orfsFile) Seek(offset int64, whence int) (int64, error) {
+func (f *File) Seek(offset int64, whence int) (int64, error) {
 	fmt.Fprintf(f.orfs.debuglog, "Seek: %v\n", f.oid)
 	switch whence {
 	case 0: // Seek from start of file
@@ -47,7 +47,7 @@ func (f *orfsFile) Seek(offset int64, whence int) (int64, error) {
 	return int64(f.pos), nil
 }
 
-func (f *orfsFile) Write(p []byte) (int, error) {
+func (f *File) Write(p []byte) (int, error) {
 	fmt.Fprintf(f.orfs.debuglog, "Write: %v\n", f.oid)
 	err := f.orfs.ioctx.Write(f.oid, p, f.pos)
 	if err != nil {
@@ -60,7 +60,7 @@ func (f *orfsFile) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (f *orfsFile) Readdir(count int) ([]os.FileInfo, error) {
+func (f *File) Readdir(count int) ([]os.FileInfo, error) {
 	fmt.Fprintf(f.orfs.debuglog, "Readdir: %v\n", f.oid)
 	if f.oid == "" {
 		// Is root directory, create file listing.
@@ -88,13 +88,13 @@ func (f *orfsFile) Readdir(count int) ([]os.FileInfo, error) {
 	return nil, fmt.Errorf("Not a directory!")
 }
 
-func (f *orfsFile) rootStat() (*cephStat, error) {
+func (f *File) rootStat() (*Stat, error) {
 	stat, err := f.orfs.ioctx.GetPoolStats()
 	if err != nil {
 		log.Println(err)
 		return nil, err
 	}
-	return &cephStat{
+	return &Stat{
 		name:    "",
 		size:    int64(stat.Num_bytes),
 		mode:    os.FileMode(755) + 1<<(32-1),
@@ -104,7 +104,7 @@ func (f *orfsFile) rootStat() (*cephStat, error) {
 	}, nil
 }
 
-func (f *orfsFile) Stat() (os.FileInfo, error) {
+func (f *File) Stat() (os.FileInfo, error) {
 	log.Println("Stat: ", f.oid)
 	if f.oid == "" {
 		// Stat on root directory, make up a directory..
@@ -121,7 +121,7 @@ func (f *orfsFile) Stat() (os.FileInfo, error) {
 			return nil, err
 		}
 	}
-	return &cephStat{
+	return &Stat{
 		name:    f.oid,
 		size:    int64(stat.Size),
 		mode:    os.FileMode(0644),

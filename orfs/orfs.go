@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"github.com/ceph/go-ceph/rados"
 	"io"
+	"io/ioutil"
 	"os"
 )
 
-type orfs struct {
+type Orfs struct {
 	conn     *rados.Conn
 	ioctx    *rados.IOContext
 	mdctx    *rados.IOContext
@@ -17,21 +18,24 @@ type orfs struct {
 	debuglog io.Writer
 }
 
-func NewORFS(pool, mdpool string) {
-	c := new(orfs)
+func NewORFS(pool, mdpool string) *Orfs {
+	c := new(Orfs)
 	c.pool = pool
 	c.mdpool = mdpool
+	c.log = ioutil.Discard      // Default to discarding all logs
+	c.debuglog = ioutil.Discard // Default to discarding all debug logs
+	return c
 }
 
-func (c *orfs) SetLog(log io.Writer) {
+func (c *Orfs) SetLog(log io.Writer) {
 	c.log = log
 }
 
-func (c *orfs) SetDebugLog(debugLog io.Writer) {
+func (c *Orfs) SetDebugLog(debugLog io.Writer) {
 	c.debuglog = debugLog
 }
 
-func (c *orfs) Connect(pool string) error {
+func (c *Orfs) Connect() error {
 	fmt.Fprint(c.debuglog, "Creating connection\n")
 	if conn, err := rados.NewConn(); err != nil {
 		fmt.Fprint(c.debuglog, err)
@@ -51,14 +55,14 @@ func (c *orfs) Connect(pool string) error {
 	}
 	fmt.Fprintf(c.debuglog, "Creating IO Context for pool: %v\n", c.pool)
 	if ioctx, err := c.conn.OpenIOContext(c.pool); err != nil {
-		fmt.Fprint(c.debuglog, err)
+		fmt.Fprintf(c.debuglog, "Failed to create iocontext for pool, does the pool exist?: %v\n", err)
 		return err
 	} else {
 		c.ioctx = ioctx
 	}
 	fmt.Fprintf(c.debuglog, "Creating IO context for pool: %v\n", c.mdpool)
 	if mdctx, err := c.conn.OpenIOContext(c.mdpool); err != nil {
-		fmt.Fprint(c.debuglog, err)
+		fmt.Fprintf(c.debuglog, "Failed to create iocontext for pool, does the pool exist?: %v\n", err)
 		return err
 	} else {
 		c.mdctx = mdctx
@@ -67,30 +71,30 @@ func (c *orfs) Connect(pool string) error {
 	return nil
 }
 
-func (c *orfs) Mkdir(name string, perm os.FileMode) error {
+func (c *Orfs) Mkdir(name string, perm os.FileMode) error {
 	fmt.Fprintf(c.debuglog, "ORFS: Mkdir: %v\n", name)
 	return nil
 }
 
-func (c *orfs) createFD(name string) *orfsFile {
-	return &orfsFile{
+func (c *Orfs) createFD(name string) *File {
+	return &File{
 		oid:  name,
 		pos:  0,
 		orfs: c,
 	}
 }
 
-func (c *orfs) OpenFile(name string, flag int, perm os.FileMode) (*orfsFile, error) {
+func (c *Orfs) OpenFile(name string, flag int, perm os.FileMode) (*File, error) {
 	fmt.Fprintf(c.debuglog, "ORFS: OpenFile: %v\n", name)
 	return c.createFD(name), nil
 }
 
-func (c *orfs) RemoveAll(name string) error {
+func (c *Orfs) RemoveAll(name string) error {
 	fmt.Fprintf(c.debuglog, "ORFS: Removeall: %v\n", name)
 	return c.ioctx.Delete(name)
 }
 
-func (c *orfs) Rename(oldName, newName string) error {
+func (c *Orfs) Rename(oldName, newName string) error {
 	fmt.Fprintf(c.debuglog, "ORFS: Rename: %v -> %v", oldName, newName)
 	oldf := c.createFD(oldName)
 	defer oldf.Close()
@@ -123,7 +127,7 @@ func (c *orfs) Rename(oldName, newName string) error {
 	//return fmt.Errorf("Renaming not supported")
 }
 
-func (c *orfs) Stat(name string) (os.FileInfo, error) {
+func (c *Orfs) Stat(name string) (os.FileInfo, error) {
 	fmt.Fprintf(c.debuglog, "orfsDAV: Stat: %v\n", name)
 	f := c.createFD(name)
 	return f.Stat()
