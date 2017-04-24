@@ -4,10 +4,20 @@ import (
 	"fmt"
 	"github.com/ceph/go-ceph/rados"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/google/uuid"
 	"log"
 	"os"
-	"time"
 )
+
+type Inode interface {
+	Readdir(count int) ([]os.FileInfo, error) // How do i implement this properly?
+	Stat() (os.FileInfo, error)
+	Read(p []byte) (int, error)
+	Seek(offset int64, whence int) (int64, error)
+	Write(p []byte) (int, error)
+	Close() error
+	Delete() error // Delete / Unlink the data.
+}
 
 type File struct {
 	oid  string
@@ -62,57 +72,16 @@ func (f *File) Write(p []byte) (int, error) {
 
 func (f *File) Readdir(count int) ([]os.FileInfo, error) {
 	fmt.Fprintf(f.orfs.debuglog, "Readdir: %v\n", f.oid)
-	if f.oid == "" {
-		// Is root directory, create file listing.
-		dirList := []os.FileInfo{}
-		if root, err := f.rootStat(); err != nil {
-			return nil, err
-		} else {
-			dirList = append(dirList, root)
-		}
-		iter, err := f.orfs.ioctx.Iter()
-		if err != nil {
-			return nil, err
-		}
-		defer iter.Close()
-		for iter.Next() {
-			log.Printf("%v\n", iter.Value())
-			stat, err := f.orfs.Stat(iter.Value())
-			if err != nil {
-				fmt.Fprintf(f.orfs.debuglog, "Error in Readdir / stat: %v", err)
-			}
-			dirList = append(dirList, stat)
-		}
-		return dirList, iter.Err()
-	}
-	return nil, fmt.Errorf("Not a directory!")
-}
-
-func (f *File) rootStat() (*Stat, error) {
-	stat, err := f.orfs.ioctx.GetPoolStats()
-	if err != nil {
-		log.Println(err)
-		return nil, err
-	}
-	return &Stat{
-		name:    "",
-		size:    int64(stat.Num_bytes),
-		mode:    os.FileMode(755) + 1<<(32-1),
-		modTime: time.Now(),
-		isDir:   true,
-		sys:     nil,
-	}, nil
+	return nil, fmt.Errorf("Not Implemented directory!")
 }
 
 func (f *File) Stat() (os.FileInfo, error) {
 	log.Println("Stat: ", f.oid)
-	if f.oid == "" {
-		// Stat on root directory, make up a directory..
-		return f.rootStat()
-	}
-	stat, err := f.orfs.ioctx.Stat(f.oid)
+	fmt.Printf("Stat'ing: %v\n", f.oid)
+	stat, err := f.orfs.mdctx.Stat(f.oid)
+	fmt.Printf("stat: %+v, err: %v\n", stat, err)
 	if err != nil {
-		log.Println(err)
+		log.Printf("Failed mdctx.Stat oid: %v, err: %v\n", f.oid, err)
 		spew.Dump(err)
 		switch err {
 		case rados.RadosErrorNotFound:
@@ -121,12 +90,31 @@ func (f *File) Stat() (os.FileInfo, error) {
 			return nil, err
 		}
 	}
-	return &Stat{
+	s := &Istat{
 		name:    f.oid,
 		size:    int64(stat.Size),
 		mode:    os.FileMode(0644),
 		modTime: stat.ModTime,
 		isDir:   false,
+		inode:   uuid.New(),
 		sys:     nil,
-	}, nil
+	}
+	str := makeMdEntry('+', s)
+	n, err := fmt.Printf("MD Entry: Len:%v, %+v\n", len(str), string(str))
+	fmt.Printf("Printed: %v chars\n", n)
+	if err != nil {
+		panic(err)
+	}
+	state, entry, err := parseMdEntry(str)
+	if err != nil {
+		panic(err)
+	}
+	str = makeMdEntry(state, entry)
+	n, err = fmt.Printf("Recreated MD Entry: Len:%v, %+v\n", len(str), string(str))
+	fmt.Printf("Printed: %v chars\n", n)
+	if err != nil {
+		panic(err)
+	}
+
+	return s, nil
 }

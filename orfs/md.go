@@ -2,115 +2,221 @@ package orfs
 
 import (
 	"fmt"
-	"github.com/ceph/go-ceph/rados"
+	"github.com/google/uuid"
 	"github.com/howeyc/crc16"
-	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
-	"unsafe"
 )
 
-type md struct {
-	ioctx *rados.IOContext
-	cache map[string]map[string]Stat
+var MdEntryTooShort = fmt.Errorf("Metadata entry too short")
+var MdEntryEmpty = fmt.Errorf("Metadata entry empty")
+var MdEntryInvalid = fmt.Errorf("Metadata entry is invalid")
+
+func makeMdEntryNewline(state byte, f OrfsStat) []byte {
+	ret := makeMdEntry(state, f)
+	return append(ret, "\n"...)
+	//ret := []byte("\n")
+	//return append(ret, makeMdEntry(state, f)...)
 }
 
-// Encode entry v into b as LittleEndian, starting from position p
-func PutUint64(b []byte, v uint64, p int) {
-	_ = b[7+p] // early bounds check to guarantee safety of writes below
-	b[0+p] = byte(v)
-	b[1+p] = byte(v >> 8)
-	b[2+p] = byte(v >> 16)
-	b[3+p] = byte(v >> 24)
-	b[4+p] = byte(v >> 32)
-	b[5+p] = byte(v >> 40)
-	b[6+p] = byte(v >> 48)
-	b[7+p] = byte(v >> 56)
-}
-
-// Encode entry v into b as LittleEndian, starting from position p
-func PutUint32(b []byte, v uint32, p int) {
-	_ = b[3+p] // early bounds check to guarantee safety of writes below
-	b[0+p] = byte(v)
-	b[1+p] = byte(v >> 8)
-	b[2+p] = byte(v >> 16)
-	b[3+p] = byte(v >> 24)
-}
-
-// Encode entry v into b as LittleEndian, starting from position p
-func PutUint16(b []byte, v uint16, p int) {
-	_ = b[1+p] // early bounds check to guarantee safety of writes below
-	b[0+p] = byte(v)
-	b[1+p] = byte(v >> 8)
-}
-
-func makeMdEntry(state byte, f Stat) []byte {
-	nLength := len(f.name)
-	entry := make([]byte, 23+nLength)
+func makeMdEntry(state byte, f OrfsStat) []byte {
+	entry := []byte{}
 	// write out state first.
-	entry[0] = state
-	// Encode f.size (int64) in the byte slice as uint64
-	PutUint64(entry, uint64(f.size), 1)
-	// Encode f.modTime.Unix() in the byte slice as uint64
-	PutUint64(entry, uint64(f.modTime.Unix()), 9)
-	PutUint32(entry, uint32(f.modTime.Nanosecond()), 17)
-	// Encode len(f.name) in the byte slice as uint16
-	PutUint16(entry, uint16(nLength), 21)
-	// write out f.name into byte slice
-	for p := 0; p <= nLength; p++ {
-		entry[p+23] = f.name[p]
+	entry = append(entry, state)
+	if f.IsDir() {
+		entry = append(entry, 'd')
+	} else {
+		entry = append(entry, 'f')
 	}
-	PutUint16(entry, crc16.ChecksumCCITT(entry[0:23+nLength]), 23+nLength)
+	// Encode len(f.name) in the byte slice as uint16
+	entry = append(entry, ';')
+	entry = append(entry, []byte(strconv.FormatUint(uint64(len(f.Name())), 10))...)
+	// write out f.name into byte slice
+	entry = append(entry, ';')
+	entry = append(entry, []byte(f.Name())...)
+	// Encode f.size (int64) in the byte slice as uint64
+	entry = append(entry, ';')
+	entry = append(entry, []byte(strconv.FormatUint(uint64(f.Size()), 10))...)
+	// Encode f.modTime.Unix() in the byte slice as uint64
+	entry = append(entry, ';')
+	entry = append(entry, []byte(strconv.FormatUint(uint64(f.ModTime().Unix()), 10))...)
+	// Add inode (uuid)
+	entry = append(entry, ';')
+	entry = append(entry, uuid.UUID(f.Inode()).String()...)
+
+	// Calculate checksum and write it out.
+	crc := crc16.ChecksumCCITT(entry)
+	entry = append(entry, ';')
+	entry = append(entry, []byte(strconv.FormatUint(uint64(crc), 16))...)
 	return entry
 }
 
-func parseMdEntry(entry []byte) (byte, *Stat, error) {
-	// Entry looks like:
-	// add(+)/remove(-) uint64(size of file) int64(modTime seconds) int32(modTime nanoSeconds) length(of filename) []byte(<filename>) uint16(checksum)
-	// [+-]int16<file>uint64int64int32
-	state := entry[0]
-	if len(entry) < 24 {
-		return state, nil, fmt.Errorf("DecodeError: Metadata expected entry of min size: %v, got %v", 24, len(entry))
+func findNext(p []byte, del byte, start int) int {
+	for i := start; i < len(p); i++ {
+		if p[i] == del {
+			return start + i
+		}
 	}
-	size := *(*uint64)(unsafe.Pointer(&entry[1]))
-	sTime := *(*int64)(unsafe.Pointer(&entry[9]))
-	nTime := *(*int32)(unsafe.Pointer(&entry[17]))
-	nLength := *(*int16)(unsafe.Pointer(&entry[21]))
-	if len(entry) != 24+int(nLength) {
-		return state, nil, fmt.Errorf("DecodeError: Metadata expected entry of size: %v, got: %v", 25+nLength, len(entry))
-	}
-	name := string(entry[23 : 23+nLength])
-	crc := *(*uint16)(unsafe.Pointer(&entry[22+nLength]))
-	if crc16.ChecksumCCITT(entry[0:21+nLength]) != crc {
-		return 0, nil, fmt.Errorf("DecodeError: Metadata CRC error")
-	}
-
-	f := Stat{
-		name:    name,
-		size:    int64(size),
-		mode:    os.FileMode(644),
-		modTime: time.Unix(sTime, int64(nTime)),
-		isDir:   name[len(name)-1] == '/',
-		sys:     nil}
-	return state, &f, nil
+	return -1
 }
 
-func readMD(name string) (*[]Stat, error) {
-	if name == "" {
-		name = "root/"
+func parseMdEntry(entry []byte) (byte, OrfsStat, error) {
+	// Check if entry is empty
+	if len(entry) == 0 {
+		return 0x0, nil, MdEntryEmpty
 	}
-	//files := new([]cephStat)
-	buf := make([]byte, 1048576) // should make this a loop and parse stuff as i go..
-	//read, err := f.ceph.mdctx.Read(name, buf, 0)
-	read := 0
-	err := fmt.Errorf("asd")
+	// Shortest possible MD Entry length is 12 bytes
+	if len(entry) < 12 {
+		return 0x0, nil, MdEntryTooShort
+	}
+	pos := 0
+	etype := entry[pos:findNext(entry, ';', 0)]
+	fmt.Printf("Len etype: %v, etype: %v\n", len(etype), etype)
+	if len(etype) != 2 {
+		panic(MdEntryInvalid)
+		return 0x0, nil, MdEntryInvalid
+	}
+	pos += len(etype) + 1
+	state := etype[0]
+	isDir := etype[1] == 'd'
+	fmt.Printf("ParseMDEntry, is dir: %v\n", isDir)
+
+	// read out filename length
+	nLengthBytes := entry[pos : findNext(entry, ';', pos)-pos]
+	nLength, err := strconv.ParseUint(string(nLengthBytes), 10, 64)
 	if err != nil {
-		log.Println("readMd ctx read: ", err)
-		return nil, err
+		fmt.Printf("nlength bytes: %v, string: %v, err: %v\n", nLengthBytes, string(nLengthBytes), err)
+		panic(MdEntryInvalid)
+		return 0x0, nil, MdEntryInvalid
 	}
-	for _, file := range strings.Split(string(buf[:read]), "\n") {
-		log.Println(parseMdEntry([]byte(file)))
+	pos += len(nLengthBytes) + 1
+	// Read filename of length
+	fName := entry[pos : uint64(pos)+nLength]
+	pos += len(fName) + 1
+
+	// Read out filesize
+	fsizeBytes := entry[pos : findNext(entry, ';', pos)-pos]
+	fsize, err := strconv.ParseUint(string(fsizeBytes), 10, 64)
+	if err != nil {
+		fmt.Printf("fsizeBytes bytes: %v, string: %v, err: %v\n", fsizeBytes, string(fsizeBytes), err)
+		panic(MdEntryInvalid)
+		return 0x0, nil, MdEntryInvalid
 	}
-	return nil, nil
+	pos += len(fsizeBytes) + 1
+
+	// Read out modtime
+	modTimeBytes := entry[pos : findNext(entry, ';', pos)-pos]
+	modTime, err := strconv.ParseUint(string(modTimeBytes), 10, 64)
+	if err != nil {
+		panic(MdEntryInvalid)
+		return 0x0, nil, MdEntryInvalid
+	}
+	pos += len(modTimeBytes) + 1
+
+	// Read out file inode (uuid)
+	inode, err := uuid.Parse(string(entry[pos : pos+36]))
+	if err != nil {
+		return 0x0, nil, err
+	}
+	pos += 36 + 1
+
+	// Read out crc
+	crcBytes := entry[pos:]
+	crc, err := strconv.ParseUint(string(crcBytes), 16, 16)
+	if err != nil {
+		fmt.Printf("crcBytes: %v, string: %v, err: %v\n", crcBytes, string(crcBytes), err)
+		panic(MdEntryInvalid)
+		return 0x0, nil, MdEntryInvalid
+	}
+
+	// Calculate crc
+	crcCalc := crc16.ChecksumCCITT(entry[0 : pos-1])
+	if uint16(crc) != crcCalc {
+		panic(MdEntryInvalid)
+		return 0x0, nil, MdEntryInvalid
+	}
+
+	fileMode := os.FileMode(0000)
+	if isDir {
+		fileMode = os.FileMode(0755)
+	} else {
+		fileMode = os.FileMode(0644)
+	}
+
+	f := Istat{
+		isDir:   isDir,
+		modTime: time.Unix(int64(modTime), 0),
+		mode:    fileMode,
+		name:    string(fName),
+		size:    int64(fsize),
+		sys:     nil,
+	}
+	copy(f.inode[:], inode[:16])
+	fmt.Printf("ParseMDEntry, Stat isdir: %v\n", f.IsDir())
+	return state, &f, nil
+
+}
+
+func (f *fsObj) ReadMD() error {
+	buf := make([]byte, 1024*1024*4) // should make this a loop and parse stuff as i go..
+	pos := uint64(0)
+
+	for {
+		n, err := f.fs.mdctx.Read(f.Inode().String(), buf, pos)
+		if err != nil {
+			fmt.Fprintf(f.fs.debuglog, "Failed to read inode: %v, error: %v\n", f.Inode().String(), err)
+			return err
+		}
+		mdEntries := strings.Split(string(buf[:n]), "\n")
+		for _, entry := range mdEntries {
+			status, stat, err := parseMdEntry([]byte(entry))
+			if err == MdEntryEmpty {
+				continue
+			} else {
+				fmt.Fprintf(f.fs.debuglog, "Failed to parse MD entry, entry: %v, error: %v\n", entry, err)
+			}
+			if status == '+' {
+				fmt.Fprintf(f.fs.debuglog, "Readdir on: %v, adding %v, isdir: %v\n", f.Inode().String(), stat.Name(), stat.IsDir())
+				if stat.IsDir() {
+					f.childDir[stat.Inode()] = &fsObj{
+						name:    stat.Name(),
+						size:    stat.Size(),
+						mode:    stat.Mode(),
+						modTime: stat.ModTime(),
+						isDir:   stat.IsDir(),
+						inode:   stat.Inode(),
+					}
+				} else {
+					f.childObj[stat.Inode()] = &fsObj{
+						name:    stat.Name(),
+						size:    stat.Size(),
+						mode:    stat.Mode(),
+						modTime: stat.ModTime(),
+						isDir:   stat.IsDir(),
+						inode:   stat.Inode(),
+					}
+				}
+			} else if status == '-' {
+				fmt.Fprintf(f.fs.debuglog, "Readdir on: %v, removing %v\n", f.Inode().String(), stat.Name())
+				if stat.IsDir() {
+					delete(f.childDir, stat.Inode())
+				} else {
+					delete(f.childObj, stat.Inode())
+				}
+			} else {
+				return fmt.Errorf("Weird status: %v for entry: %v\n", status, entry)
+			}
+		}
+		f.lastRead = time.Now()
+
+		if n == len(buf) {
+			pos += uint64(n)
+		} else {
+			break
+		}
+
+	}
+	return nil
 }
