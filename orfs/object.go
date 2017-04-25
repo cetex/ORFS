@@ -46,10 +46,16 @@ type fsObj struct {
 }
 
 /* FIXME: THIS SHOULDN'T CREATE AN INODE IMMEDIATELY!*/
-func NewDir(fs *Orfs, Name string) (OBJ, error) {
+func NewObj(fs *Orfs, Name string, isDir bool) (OBJ, error) {
 	_uuid := uuid.New()
+	ctx := fs.mdctx
+
+	if !isDir {
+		// Is not directory, write data elsewhere.
+		ctx = fs.ioctx
+	}
 	for {
-		_, err := fs.mdctx.Stat(_uuid.String())
+		_, err := ctx.Stat(_uuid.String())
 		if err == nil {
 			// UUID already exists
 			_uuid = uuid.New()
@@ -58,23 +64,30 @@ func NewDir(fs *Orfs, Name string) (OBJ, error) {
 		break
 	}
 
-	dir := fsObj{
-		name:     Name,
-		size:     0,
-		mode:     os.FileMode(755) | os.ModeDir,
-		modTime:  time.Now(),
-		isDir:    true,
-		inode:    _uuid,
-		fs:       fs,
-		children: make(map[string]uuid.UUID),
+	mode := os.FileMode(0644)
+	var children map[string]uuid.UUID
+	if isDir {
+		mode = os.FileMode(0755) | os.ModeDir
+		children = make(map[string]uuid.UUID)
 	}
 
-	err := dir.ReSync()
+	obj := fsObj{
+		name:     Name,
+		size:     0,
+		mode:     mode,
+		modTime:  time.Now(),
+		isDir:    isDir,
+		inode:    _uuid,
+		fs:       fs,
+		children: children,
+	}
+
+	err := obj.ReSync()
 	if err != nil {
 		return nil, err
 	}
 
-	return &dir, nil
+	return &obj, nil
 }
 
 func GetObjInode(fs *Orfs, Inode uuid.UUID) (OBJ, error) {
@@ -216,9 +229,10 @@ func (f *fsObj) Delete(o OBJ) error {
 func (f *fsObj) Open() (*File, error) {
 	fmt.Fprintf(debuglog, "Open of Inode: %v\n", f.Inode())
 	return &File{
-		Inode: f,
-		fs:    f.fs,
-		pos:   0,
+		Inode:  f,
+		fs:     f.fs,
+		pos:    0,
+		dInode: f.Inode().String() + ".1", // Stupidly ugly, but works to write and read data.
 	}, nil
 }
 
@@ -260,10 +274,14 @@ func (f *fsObj) ReadMD() error {
 	buf := make([]byte, 1024*1024*4) // should make this a loop and parse stuff as i go..
 	pos := uint64(0)
 
-	fmt.Printf("ReadMD: f.fs: %+v\n", f.fs)
-	fmt.Printf("ReadMD: f.fs.mdctx: %+v\n", f.fs.mdctx)
+	ctx := f.fs.mdctx
+
+	if !f.IsDir() {
+		// Is not directory, write data elsewhere.
+		ctx = f.fs.ioctx
+	}
 	fmt.Printf("ReadMD: f.Inode: %+v\n", f.Inode().String())
-	stat, err := f.fs.mdctx.Stat(f.Inode().String())
+	stat, err := ctx.Stat(f.Inode().String())
 	if err != nil {
 		return err
 	}
@@ -275,7 +293,7 @@ func (f *fsObj) ReadMD() error {
 	}
 
 	for {
-		n, err := f.fs.mdctx.Read(f.Inode().String(), buf, pos)
+		n, err := ctx.Read(f.Inode().String(), buf, pos)
 		if err != nil {
 			fmt.Fprintf(debuglog, "Failed to read inode: %v, error: %v\n", f.Inode().String(), err)
 			return err
@@ -328,19 +346,26 @@ func (f *fsObj) ReadMD() error {
 
 // Synchronizes the directory to disk.
 func (f *fsObj) ReSync() error {
+	ctx := f.fs.mdctx
+
+	if !f.IsDir() {
+		// Is not directory, write to datapool.
+		ctx = f.fs.ioctx
+	}
+
 	if f.ModTime().After(f.lastRead) {
 		fmt.Printf("ReSync: ModTime is after lastread\n")
 		// Stat it, if it exists -> lock it, defer unlock, truncate it.
-		_, err := f.fs.mdctx.Stat(f.Inode().String())
+		_, err := ctx.Stat(f.Inode().String())
 		if err == nil {
 			// Lock, truncate, unlock
 			fmt.Printf("ReSync: Locking Inode\n")
-			_, err := f.fs.mdctx.LockExclusive(f.Inode().String(), "Sync", f.Inode().String(), "Sync of dir", 0, nil)
+			_, err := ctx.LockExclusive(f.Inode().String(), "Sync", f.Inode().String(), "Sync of dir", 0, nil)
 			if err != nil {
 				return err
 			}
 			fmt.Printf("ReSync: Locked Inode\n")
-			defer f.fs.mdctx.Unlock(f.Inode().String(), "Sync", f.Inode().String())
+			defer ctx.Unlock(f.Inode().String(), "Sync", f.Inode().String())
 		} else if err != rados.RadosErrorNotFound {
 			return err
 		}
@@ -361,7 +386,7 @@ func (f *fsObj) ReSync() error {
 		if len(md) == 0 {
 			panic("Metadata entry can not be zero!")
 		}
-		err = f.fs.mdctx.WriteFull(f.Inode().String(), md)
+		err = ctx.WriteFull(f.Inode().String(), md)
 		if err != nil {
 			return err
 		}

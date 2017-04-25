@@ -23,7 +23,7 @@ func main() {
 	}
 
 	if !fs.Root.HasChild("Test") {
-		dir, err := orfs.NewDir(fs, "Test")
+		dir, err := orfs.NewObj(fs, "Test", true)
 		if err != nil {
 			panic(err)
 		}

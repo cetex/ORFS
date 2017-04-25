@@ -135,7 +135,7 @@ func pathSplit(path string) []string {
 // name is the path, for example /testdir/testfile
 // If GetParent is set it returns the parent of testfile.
 func (fs *Orfs) GetObject(name string, GetParent bool) (OBJ, error) {
-	dir := fs.Root
+	obj := fs.Root
 	path := pathSplit(name)
 
 	if len(path) == 0 {
@@ -151,16 +151,16 @@ func (fs *Orfs) GetObject(name string, GetParent bool) (OBJ, error) {
 	// Call update on parentObject to populate children if it hasn't happened yet.
 	for i := 0; i < len(path)-skip; i++ {
 		fmt.Fprintf(debuglog, "FindObject: current path: %v, i: %v, len(path): %v\n", path[i], i, len(path))
-		if _dir, err := dir.Get(path[i]); err == nil {
-			fmt.Fprintf(debuglog, "FindObject: Found child: %v\n", _dir.Name())
-			dir = _dir
+		if _obj, err := obj.Get(path[i]); err == nil {
+			fmt.Fprintf(debuglog, "FindObject: Found child: %v\n", _obj.Name())
+			obj = _obj
 		} else {
 			fmt.Fprintf(debuglog, "FindObject: Couldn't find parent object\n")
 			// Parent object doesn't exist
 			return nil, os.ErrNotExist
 		}
 	}
-	return dir, nil
+	return obj, nil
 }
 
 // Create a directory in ORFS.
@@ -175,7 +175,7 @@ func (fs *Orfs) Mkdir(name string, perm os.FileMode) error {
 	}
 
 	path := pathSplit(name)
-	subdir, err := NewDir(fs, path[len(path)-1:][0])
+	subdir, err := NewObj(fs, path[len(path)-1:][0], true)
 	if err != nil {
 		return err
 	}
@@ -188,14 +188,27 @@ func (fs *Orfs) Mkdir(name string, perm os.FileMode) error {
 // name is the path, for example /test/NewDir or /test/testfile
 func (fs *Orfs) OpenFile(name string, flag int, perm os.FileMode) (*File, error) {
 	fmt.Fprintf(debuglog, "OpenFile: %v, flag: %v, perm: %v\n", name, flag, perm)
-	//	path := pathSplit(name)
-	//	dir, err := fs.FindObject(path)
-	//	if err != nil {
-	//		return nil, err
-	//	}
-	//	obj, err := dir.Get(path[len(path)-1:][0])
 	obj, err := fs.GetObject(name, false)
-	if err != nil {
+	if err == os.ErrNotExist && flag&os.O_CREATE > 0 {
+		// Doesn't exist yet but O_CREATE is set so we try to create.
+		// Find parent
+		dir, err := fs.GetObject(name, true)
+		if err != nil {
+			// Parent not found, return error
+			return nil, err
+		}
+		// Create a new object and add it to obj
+		path := pathSplit(name)
+		obj, err = NewObj(fs, path[len(path)-1:][0], false)
+		if err != nil {
+			return nil, err
+		}
+		err = dir.Add(obj)
+		if err != nil {
+			return nil, err
+		}
+
+	} else if err != nil {
 		return nil, err
 	}
 	return obj.Open()
@@ -256,6 +269,9 @@ func (fs *Orfs) Rename(oldName, newName string) error {
 // Stat an object
 func (fs *Orfs) Stat(name string) (os.FileInfo, error) {
 	fmt.Fprintf(debuglog, "Stat: %v\n", name)
-	return fs.GetObject(name, false)
-
+	obj, err := fs.GetObject(name, false)
+	if err != nil {
+		return obj, err
+	}
+	return obj, obj.ReSync()
 }
