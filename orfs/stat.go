@@ -1,40 +1,50 @@
 package orfs
 
 import (
+	"github.com/google/uuid"
 	"os"
 	"time"
 )
 
-type Stat struct {
-	name     string
-	size     int64
-	mode     os.FileMode
-	modTime  time.Time
-	isDir    bool
-	sys      interface{}
-	statDone bool
+type OrfsStat interface {
+	os.FileInfo
+	Inode() uuid.UUID
 }
 
-func (s *Stat) Name() string {
+type Istat struct {
+	name    string
+	size    int64
+	mode    os.FileMode
+	modTime time.Time
+	isDir   bool
+	sys     interface{}
+	inode   uuid.UUID
+}
+
+func (s *Istat) Name() string {
 	return s.name
 }
 
-func (s *Stat) Size() int64 {
+func (s *Istat) Size() int64 {
 	return s.size
 }
 
-func (s *Stat) Mode() os.FileMode {
+func (s *Istat) Mode() os.FileMode {
 	return s.mode
 }
 
-func (s *Stat) ModTime() time.Time {
+func (s *Istat) ModTime() time.Time {
 	return s.modTime
 }
 
-func (s *Stat) IsDir() bool {
+func (s *Istat) IsDir() bool {
 	return s.isDir
 }
 
-func (s *Stat) Sys() interface{} {
+func (s *Istat) Inode() uuid.UUID {
+	return s.inode
+}
+
+func (s *Istat) Sys() interface{} {
 	return s.sys
 }

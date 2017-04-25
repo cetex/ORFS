@@ -3,132 +3,316 @@ package orfs
 import (
 	"fmt"
 	"github.com/ceph/go-ceph/rados"
+	"github.com/google/uuid"
+	"github.com/hashicorp/golang-lru"
 	"io"
 	"io/ioutil"
 	"os"
+	"strings"
+	"time"
 )
 
+var log io.Writer = ioutil.Discard
+var debuglog io.Writer = ioutil.Discard
+
 type Orfs struct {
-	conn     *rados.Conn
-	ioctx    *rados.IOContext
-	mdctx    *rados.IOContext
-	pool     string
-	mdpool   string
-	log      io.Writer
-	debuglog io.Writer
+	conn   *rados.Conn
+	ioctx  *rados.IOContext
+	mdctx  *rados.IOContext
+	pool   string
+	mdpool string
+	Root   OBJ
+	cache  lru.Cache
 }
 
-func NewORFS(pool, mdpool string) *Orfs {
+// Creates a new instance of ORFS
+// pool is the datapool and mdpool is the metadatapool
+// Both pools can be the same pool as long as the pool supports
+// partial writes, an erasure coded pool is not supported for
+// metadata.
+//
+// Example:
+// datapool := "test"
+// metadatapool := "test-metadata"
+// cachesize := 1024*1024 // number of metadata entries in cache
+// fs := NewORFS(datapool, metadatapool, cacheSize)
+func NewORFS(pool, mdpool string, cacheSize int) *Orfs {
 	c := new(Orfs)
 	c.pool = pool
 	c.mdpool = mdpool
-	c.log = ioutil.Discard      // Default to discarding all logs
-	c.debuglog = ioutil.Discard // Default to discarding all debug logs
+	cache, err := lru.New(cacheSize)
+	if err != nil {
+		panic(err)
+	}
+	c.cache = *cache
 	return c
 }
 
-func (c *Orfs) SetLog(log io.Writer) {
-	c.log = log
+// Sets the log output, default is ioutil.discard
+//
+// Example:
+// fs := NewORFS(pool, mdpool)
+// fs.SetLog(os.Stdout)
+func (fs *Orfs) SetLog(slog io.Writer) {
+	log = slog
 }
 
-func (c *Orfs) SetDebugLog(debugLog io.Writer) {
-	c.debuglog = debugLog
+// Sets the debuglog output, default is ioutil.discard
+//
+// Example:
+// fs := NewORFS(pool, mdpool, cachesize)
+// fs.SetDebugLog(os.Stdout)
+func (fs *Orfs) SetDebugLog(dlog io.Writer) {
+	debuglog = dlog
 }
 
-func (c *Orfs) Connect() error {
-	fmt.Fprint(c.debuglog, "Creating connection\n")
+func (fs *Orfs) getRootDir() (OBJ, error) {
+	rootUUID := uuid.UUID{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0}
+
+	root := fsObj{
+		name:     "/",
+		size:     0,
+		mode:     os.FileMode(755) | os.ModeDir,
+		modTime:  time.Now(),
+		isDir:    true,
+		inode:    rootUUID,
+		fs:       fs,
+		children: make(map[string]uuid.UUID),
+	}
+
+	//root.Add(&root)
+	err := root.ReSync()
+	return &root, err
+
+}
+
+// Connect to Ceph
+//
+// Example:
+// fs := NewORFS(pool, mdpool, cachesize)
+// err := fs.Connect()
+// if err != nil {
+//     panic(err)
+// }
+func (fs *Orfs) Connect() error {
+	fmt.Fprint(debuglog, "Connect: Creating connection\n")
 	if conn, err := rados.NewConn(); err != nil {
-		fmt.Fprint(c.debuglog, err)
+		fmt.Fprintf(debuglog, "ERROR: Connect: NewConn: %v\n", err)
 		return err
 	} else {
-		c.conn = conn
+		fs.conn = conn
 	}
-	fmt.Fprint(c.debuglog, "Reading config file\n")
-	if err := c.conn.ReadDefaultConfigFile(); err != nil {
-		fmt.Fprint(c.debuglog, err)
+	fmt.Fprint(debuglog, "Conncet: Reading config file\n")
+	if err := fs.conn.ReadDefaultConfigFile(); err != nil {
+		fmt.Fprintf(debuglog, "ERROR: Connect: ReadConfig: %v\n", err)
 		return err
 	}
-	fmt.Fprint(c.debuglog, "Connecting to ceph\n")
-	if err := c.conn.Connect(); err != nil {
-		fmt.Fprint(c.debuglog, err)
+	fmt.Fprint(debuglog, "Connect: Connecting to ceph\n")
+	if err := fs.conn.Connect(); err != nil {
+		fmt.Fprintf(debuglog, "ERROR: Connect: Connect: %v\n", err)
 		return err
 	}
-	fmt.Fprintf(c.debuglog, "Creating IO Context for pool: %v\n", c.pool)
-	if ioctx, err := c.conn.OpenIOContext(c.pool); err != nil {
-		fmt.Fprintf(c.debuglog, "Failed to create iocontext for pool, does the pool exist?: %v\n", err)
-		return err
-	} else {
-		c.ioctx = ioctx
-	}
-	fmt.Fprintf(c.debuglog, "Creating IO context for pool: %v\n", c.mdpool)
-	if mdctx, err := c.conn.OpenIOContext(c.mdpool); err != nil {
-		fmt.Fprintf(c.debuglog, "Failed to create iocontext for pool, does the pool exist?: %v\n", err)
+	fmt.Fprintf(debuglog, "Connect: Creating IO Context for pool: %v\n", fs.pool)
+	if ioctx, err := fs.conn.OpenIOContext(fs.pool); err != nil {
+		fmt.Fprintf(debuglog, "ERROR: Connect: OpenIOContext: %v\n", err)
 		return err
 	} else {
-		c.mdctx = mdctx
+		fs.ioctx = ioctx
 	}
-	fmt.Fprint(c.debuglog, "Initialized\n")
+	fmt.Fprintf(debuglog, "Connect: Creating IO context for pool: %v\n", fs.mdpool)
+	if mdctx, err := fs.conn.OpenIOContext(fs.mdpool); err != nil {
+		fmt.Fprintf(debuglog, "ERROR: Connect: OpenIOContext: %v\n", err)
+		return err
+	} else {
+		fs.mdctx = mdctx
+	}
+
+	fmt.Fprintf(debuglog, "Connect: Initialized\n")
+	fmt.Fprintf(debuglog, "Connect: Loading rootdir\n")
+	root, err := fs.getRootDir()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Fprintf(log, "Loaded rootdir\n")
+	fs.Root = root
 	return nil
 }
 
-func (c *Orfs) Mkdir(name string, perm os.FileMode) error {
-	fmt.Fprintf(c.debuglog, "ORFS: Mkdir: %v\n", name)
+func pathSplit(path string) []string {
+	fpath := strings.Split(path, "/")
+	fmt.Println("Path: ", fpath)
+	// Delete empty strings after the split.. Can we make this more efficient?
+	for i := 0; i < len(fpath); i++ {
+		if fpath[i] == "" {
+			fpath = append(fpath[:i], fpath[i+1:]...)
+			i--
+		}
+	}
+	fmt.Println("Path After cleanup: ", fpath)
+	return fpath
+}
+
+// Get an object (File, Directory) from ORFS.
+// name is the path, for example /testdir/testfile
+// If GetParent is set it returns the parent of testfile.
+//
+// Example:
+// fs := NewORFS(pool, mdpool, cachesize)
+// err := fs.Connect()
+// if err != nil {
+//     panic(err)
+// }
+//
+// obj, err := fs.GetObject("/",  false)
+// obj is the object for root, "/"
+// obj, err := fs.GetObject("/testdir/testfile", false)
+// obj is the testfile
+// obj, err := fs.GetObject("/testdir/testfile", true)
+// obj is the directory "testdir"
+func (fs *Orfs) GetObject(name string, GetParent bool) (OBJ, error) {
+	dir := fs.Root
+	path := pathSplit(name)
+
+	if len(path) == 0 {
+		// Path is empty, is root
+		return fs.Root, nil
+	}
+
+	skip := 0
+	if GetParent {
+		skip = 1
+	}
+
+	// Call update on parentObject to populate children if it hasn't happened yet.
+	for i := 0; i < len(path)-skip; i++ {
+		fmt.Fprintf(debuglog, "FindObject: current path: %v, i: %v, len(path): %v\n", path[i], i, len(path))
+		if _dir, err := dir.Get(path[i]); err == nil {
+			fmt.Fprintf(debuglog, "FindObject: Found child: %v\n", _dir.Name())
+			dir = _dir
+		} else {
+			fmt.Fprintf(debuglog, "FindObject: Couldn't find parent object\n")
+			// Parent object doesn't exist
+			return nil, os.ErrNotExist
+		}
+	}
+	return dir, nil
+}
+
+// Create a directory in ORFS.
+// name is the path, for example /test/NewDir
+// The parent directory "/test" must exist.
+//
+// Example:
+// fs := NewORFS(pool, mdpool, cachesize)
+// err := fs.Connect()
+// if err != nil {
+//     panic(err)
+// }
+// err := fs.Mkdir("/test", os.FileMode(0755))
+// if err != nil {
+//     return(err)
+// }
+func (fs *Orfs) Mkdir(name string, perm os.FileMode) error {
+	fmt.Fprintf(debuglog, "Mkdir: %v\n", name)
+
+	dir, err := fs.GetObject(name, true)
+	if err != nil {
+		return err
+	}
+
+	path := pathSplit(name)
+	subdir, err := NewDir(fs, path[len(path)-1:][0])
+	if err != nil {
+		return err
+	}
+	err = dir.Add(subdir)
+	return err
+}
+
+// Open a file or directory in ORFS.
+// Works the same as os.OpenFile
+// name is the path, for example /test/NewDir or /test/testfile
+//
+// Example:
+// fs := NewORFS(pool, mdpool, cachesize)
+// err := fs.Connect()
+// if err != nil {
+//     panic(err)
+// }
+// file, err := fs.OpenFile("/test/testfile", 0, os.FileMode(0755))
+// if err != nil {
+//     return(err)
+// }
+func (fs *Orfs) OpenFile(name string, flag int, perm os.FileMode) (*File, error) {
+	fmt.Fprintf(debuglog, "OpenFile: %v, flag: %v, perm: %v\n", name, flag, perm)
+	//	path := pathSplit(name)
+	//	dir, err := fs.FindObject(path)
+	//	if err != nil {
+	//		return nil, err
+	//	}
+	//	obj, err := dir.Get(path[len(path)-1:][0])
+	obj, err := fs.GetObject(name, false)
+	if err != nil {
+		return nil, err
+	}
+	return obj.Open()
+}
+
+// Remove an object
+func (fs *Orfs) RemoveAll(name string) error {
+	fmt.Fprintf(debuglog, "Removeall: %v\n", name)
+	path := pathSplit(name)
+	dir, err := fs.GetObject(name, true)
+	if err != nil {
+		return err
+	}
+	obj, err := dir.Get(path[len(path)-1:][0])
+	if err != nil {
+		return err
+	}
+	err = dir.Delete(obj)
+	return err
+
+}
+
+// Rename an Object
+func (fs *Orfs) Rename(oldName, newName string) error {
+	fmt.Fprintf(debuglog, "Rename: oldName: %v, newName: %v\n", oldName, newName)
+	// Find old dir
+	oldDir, err := fs.GetObject(oldName, true)
+	if err != nil {
+		return err
+	}
+	// Grab object from dir
+	path := pathSplit(oldName)
+	obj, err := oldDir.Get(path[len(path)-1:][0])
+	if err != nil {
+		return err
+	}
+	// Find new dir
+	newDir, err := fs.GetObject(newName, true)
+	if err != nil {
+		return err
+	}
+	// Rename obj
+	obj.Rename(path[len(path)-1:][0])
+
+	// Link obj object to new dir
+	err = newDir.Add(obj)
+	if err != nil {
+		return err
+	}
+	// Unlink obj from old dir
+	err = oldDir.Unlink(obj)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
-func (c *Orfs) createFD(name string) *File {
-	return &File{
-		oid:  name,
-		pos:  0,
-		orfs: c,
-	}
-}
+// Stat an object
+func (fs *Orfs) Stat(name string) (os.FileInfo, error) {
+	fmt.Fprintf(debuglog, "Stat: %v\n", name)
+	return fs.GetObject(name, false)
 
-func (c *Orfs) OpenFile(name string, flag int, perm os.FileMode) (*File, error) {
-	fmt.Fprintf(c.debuglog, "ORFS: OpenFile: %v\n", name)
-	return c.createFD(name), nil
-}
-
-func (c *Orfs) RemoveAll(name string) error {
-	fmt.Fprintf(c.debuglog, "ORFS: Removeall: %v\n", name)
-	return c.ioctx.Delete(name)
-}
-
-func (c *Orfs) Rename(oldName, newName string) error {
-	fmt.Fprintf(c.debuglog, "ORFS: Rename: %v -> %v", oldName, newName)
-	oldf := c.createFD(oldName)
-	defer oldf.Close()
-	oldfStat, err := oldf.Stat()
-	if err != nil {
-		return err
-	}
-	newf := c.createFD(newName)
-	defer newf.Close()
-	buf := make([]byte, oldfStat.Size()) // create buf of filesize, this sucks but is a quick and dirty fix.
-	read, err := oldf.Read(buf)
-	if err != nil {
-		return err
-	}
-	if int64(read) < oldfStat.Size() {
-		return fmt.Errorf("Failed to read entire file")
-	}
-	write, err := newf.Write(buf)
-	if err != nil {
-		return err
-	}
-	if int64(write) != oldfStat.Size() {
-		return fmt.Errorf("Failed to write entire new file")
-	}
-	return c.RemoveAll(oldName)
-
-	// ceph doesn't support renaming it seems..
-	// We could read the file, write it and then delete the original
-	// but that means we can set us up for quite long-running jobs..
-	//return fmt.Errorf("Renaming not supported")
-}
-
-func (c *Orfs) Stat(name string) (os.FileInfo, error) {
-	fmt.Fprintf(c.debuglog, "orfsDAV: Stat: %v\n", name)
-	f := c.createFD(name)
-	return f.Stat()
 }
