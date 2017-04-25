@@ -32,10 +32,10 @@ type Orfs struct {
 // metadata.
 //
 // Example:
-// datapool := "test"
-// metadatapool := "test-metadata"
-// cachesize := 1024*1024 // number of metadata entries in cache
-// fs := NewORFS(datapool, metadatapool, cacheSize)
+//  datapool := "test"
+//  metadatapool := "test-metadata"
+//  cachesize := 1024*1024 // number of metadata entries in cache
+//  fs := NewORFS(datapool, metadatapool, cacheSize)
 func NewORFS(pool, mdpool string, cacheSize int) *Orfs {
 	c := new(Orfs)
 	c.pool = pool
@@ -60,8 +60,8 @@ func (fs *Orfs) SetLog(slog io.Writer) {
 // Sets the debuglog output, default is ioutil.discard
 //
 // Example:
-// fs := NewORFS(pool, mdpool, cachesize)
-// fs.SetDebugLog(os.Stdout)
+//  fs := NewORFS(pool, mdpool, cachesize)
+//  fs.SetDebugLog(os.Stdout)
 func (fs *Orfs) SetDebugLog(dlog io.Writer) {
 	debuglog = dlog
 }
@@ -89,11 +89,11 @@ func (fs *Orfs) getRootDir() (OBJ, error) {
 // Connect to Ceph
 //
 // Example:
-// fs := NewORFS(pool, mdpool, cachesize)
-// err := fs.Connect()
-// if err != nil {
-//     panic(err)
-// }
+//  fs := NewORFS(pool, mdpool, cachesize)
+//  err := fs.Connect()
+//  if err != nil {
+//      panic(err)
+//  }
 func (fs *Orfs) Connect() error {
 	fmt.Fprint(debuglog, "Connect: Creating connection\n")
 	if conn, err := rados.NewConn(); err != nil {
@@ -157,18 +157,18 @@ func pathSplit(path string) []string {
 // If GetParent is set it returns the parent of testfile.
 //
 // Example:
-// fs := NewORFS(pool, mdpool, cachesize)
-// err := fs.Connect()
-// if err != nil {
-//     panic(err)
-// }
+//  fs := NewORFS(pool, mdpool, cachesize)
+//  err := fs.Connect()
+//  if err != nil {
+//      panic(err)
+//  }
 //
-// obj, err := fs.GetObject("/",  false)
-// obj is the object for root, "/"
-// obj, err := fs.GetObject("/testdir/testfile", false)
-// obj is the testfile
-// obj, err := fs.GetObject("/testdir/testfile", true)
-// obj is the directory "testdir"
+//  obj, err := fs.GetObject("/",  false)
+//  obj is the object for root, "/"
+//  obj, err := fs.GetObject("/testdir/testfile", false)
+//  obj is the testfile
+//  obj, err := fs.GetObject("/testdir/testfile", true)
+//  obj is the directory "testdir"
 func (fs *Orfs) GetObject(name string, GetParent bool) (OBJ, error) {
 	dir := fs.Root
 	path := pathSplit(name)
@@ -203,15 +203,15 @@ func (fs *Orfs) GetObject(name string, GetParent bool) (OBJ, error) {
 // The parent directory "/test" must exist.
 //
 // Example:
-// fs := NewORFS(pool, mdpool, cachesize)
-// err := fs.Connect()
-// if err != nil {
-//     panic(err)
-// }
-// err := fs.Mkdir("/test", os.FileMode(0755))
-// if err != nil {
-//     return(err)
-// }
+//  fs := NewORFS(pool, mdpool, cachesize)
+//  err := fs.Connect()
+//  if err != nil {
+//      panic(err)
+//  }
+//  err := fs.Mkdir("/test", os.FileMode(0755))
+//  if err != nil {
+//      return(err)
+//  }
 func (fs *Orfs) Mkdir(name string, perm os.FileMode) error {
 	fmt.Fprintf(debuglog, "Mkdir: %v\n", name)
 
@@ -234,15 +234,15 @@ func (fs *Orfs) Mkdir(name string, perm os.FileMode) error {
 // name is the path, for example /test/NewDir or /test/testfile
 //
 // Example:
-// fs := NewORFS(pool, mdpool, cachesize)
-// err := fs.Connect()
-// if err != nil {
-//     panic(err)
-// }
-// file, err := fs.OpenFile("/test/testfile", 0, os.FileMode(0755))
-// if err != nil {
-//     return(err)
-// }
+//  fs := NewORFS(pool, mdpool, cachesize)
+//  err := fs.Connect()
+//  if err != nil {
+//      panic(err)
+//  }
+//  file, err := fs.OpenFile("/test/testfile", 0, os.FileMode(0755))
+//  if err != nil {
+//      return(err)
+//  }
 func (fs *Orfs) OpenFile(name string, flag int, perm os.FileMode) (*File, error) {
 	fmt.Fprintf(debuglog, "OpenFile: %v, flag: %v, perm: %v\n", name, flag, perm)
 	//	path := pathSplit(name)
