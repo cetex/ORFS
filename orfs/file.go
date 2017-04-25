@@ -2,12 +2,10 @@ package orfs
 
 import (
 	"fmt"
-	"github.com/ceph/go-ceph/rados"
-	"github.com/davecgh/go-spew/spew"
-	"github.com/google/uuid"
-	"log"
 	"os"
 )
+
+const BLOCKSIZE int64 = 1024 * 1024 * 4
 
 type Inode interface {
 	Readdir(count int) ([]os.FileInfo, error) // How do i implement this properly?
@@ -20,28 +18,31 @@ type Inode interface {
 }
 
 type File struct {
-	oid  string
-	pos  uint64
-	orfs *Orfs
+	Inode OBJ
+	fs    *Orfs
+	pos   uint64
 }
 
 func (f *File) Close() error {
-	fmt.Fprintf(f.orfs.debuglog, "Close: %v\n", f.oid)
-	f.oid = ""
+	fmt.Fprintf(debuglog, "Close: %v\n", f.Inode.Inode())
 	f.pos = 0
-	f.orfs = nil
+	f.fs = nil
 	return nil
 }
 
+func (f *File) Delete() error {
+	return os.ErrInvalid
+}
+
 func (f *File) Read(p []byte) (int, error) {
-	fmt.Fprintf(f.orfs.debuglog, "Read: %v\n", f.oid)
-	read, err := f.orfs.ioctx.Read(f.oid, p, f.pos)
+	fmt.Fprintf(debuglog, "Read: %v, pos: %v\n", f.Inode.Inode(), f.pos)
+	read, err := f.fs.ioctx.Read(f.Inode.Inode().String(), p, f.pos)
 	f.pos += uint64(read)
 	return read, err
 }
 
 func (f *File) Seek(offset int64, whence int) (int64, error) {
-	fmt.Fprintf(f.orfs.debuglog, "Seek: %v\n", f.oid)
+	fmt.Fprintf(debuglog, "Seek: %v, pos: %v, whence: %v\n", f.Inode.Inode(), offset, whence)
 	switch whence {
 	case 0: // Seek from start of file
 		f.pos = uint64(offset)
@@ -58,8 +59,8 @@ func (f *File) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (f *File) Write(p []byte) (int, error) {
-	fmt.Fprintf(f.orfs.debuglog, "Write: %v\n", f.oid)
-	err := f.orfs.ioctx.Write(f.oid, p, f.pos)
+	fmt.Fprintf(debuglog, "Write: %v\n", f.Inode)
+	err := f.fs.ioctx.Write(f.Inode.Inode().String(), p, f.pos)
 	if err != nil {
 		// If error, assume nothing was written. Ceph should be fully
 		// consistent and if write fails without info on how much was
@@ -71,50 +72,17 @@ func (f *File) Write(p []byte) (int, error) {
 }
 
 func (f *File) Readdir(count int) ([]os.FileInfo, error) {
-	fmt.Fprintf(f.orfs.debuglog, "Readdir: %v\n", f.oid)
+	fmt.Fprintf(debuglog, "Readdir: %v\n", f.Inode.Inode())
+	var ret []os.FileInfo
+	fsObjList, err := f.Inode.List()
+	for _, v := range fsObjList {
+		ret = append(ret, v)
+	}
+	return ret, err
 	return nil, fmt.Errorf("Not Implemented directory!")
 }
 
 func (f *File) Stat() (os.FileInfo, error) {
-	log.Println("Stat: ", f.oid)
-	fmt.Printf("Stat'ing: %v\n", f.oid)
-	stat, err := f.orfs.mdctx.Stat(f.oid)
-	fmt.Printf("stat: %+v, err: %v\n", stat, err)
-	if err != nil {
-		log.Printf("Failed mdctx.Stat oid: %v, err: %v\n", f.oid, err)
-		spew.Dump(err)
-		switch err {
-		case rados.RadosErrorNotFound:
-			return nil, os.ErrNotExist
-		default:
-			return nil, err
-		}
-	}
-	s := &Istat{
-		name:    f.oid,
-		size:    int64(stat.Size),
-		mode:    os.FileMode(0644),
-		modTime: stat.ModTime,
-		isDir:   false,
-		inode:   uuid.New(),
-		sys:     nil,
-	}
-	str := makeMdEntry('+', s)
-	n, err := fmt.Printf("MD Entry: Len:%v, %+v\n", len(str), string(str))
-	fmt.Printf("Printed: %v chars\n", n)
-	if err != nil {
-		panic(err)
-	}
-	state, entry, err := parseMdEntry(str)
-	if err != nil {
-		panic(err)
-	}
-	str = makeMdEntry(state, entry)
-	n, err = fmt.Printf("Recreated MD Entry: Len:%v, %+v\n", len(str), string(str))
-	fmt.Printf("Printed: %v chars\n", n)
-	if err != nil {
-		panic(err)
-	}
-
-	return s, nil
+	fmt.Fprintf(debuglog, "Stat'ing: %v\n", f.Inode.Inode())
+	return f.Inode, nil
 }

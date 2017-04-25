@@ -2,11 +2,11 @@ package orfs
 
 import (
 	"fmt"
+	"github.com/ceph/go-ceph/rados"
 	"github.com/google/uuid"
 	"github.com/howeyc/crc16"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -15,10 +15,24 @@ var MdEntryEmpty = fmt.Errorf("Metadata entry empty")
 var MdEntryInvalid = fmt.Errorf("Metadata entry is invalid")
 
 func makeMdEntryNewline(state byte, f OrfsStat) []byte {
-	ret := makeMdEntry(state, f)
-	return append(ret, "\n"...)
-	//ret := []byte("\n")
-	//return append(ret, makeMdEntry(state, f)...)
+	//ret := makeMdEntry(state, f)
+	//return append(ret, "\n"...)
+	ret := []byte("\n")
+	return append(ret, makeMdEntry(state, f)...)
+}
+
+func AddMDEntry(mdctx *rados.IOContext, DirInode uuid.UUID, action byte, obj OrfsStat) error {
+	_, err := mdctx.LockExclusive(DirInode.String(), "AddEntry", obj.Inode().String(), "Lock for entry addition", 0, nil)
+	if err != nil {
+		return err
+	}
+	defer mdctx.Unlock(DirInode.String(), "AddEntry", obj.Inode().String())
+	fmt.Printf("Adding obj to metadata: %v\n", obj)
+	err = mdctx.Append(DirInode.String(), makeMdEntryNewline(action, obj))
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func makeMdEntry(state byte, f OrfsStat) []byte {
@@ -140,16 +154,16 @@ func parseMdEntry(entry []byte) (byte, OrfsStat, error) {
 
 	fileMode := os.FileMode(0000)
 	if isDir {
-		fileMode = os.FileMode(0755)
+		fileMode = os.FileMode(0755) | os.ModeDir
 	} else {
 		fileMode = os.FileMode(0644)
 	}
 
 	f := Istat{
+		name:    string(fName),
 		isDir:   isDir,
 		modTime: time.Unix(int64(modTime), 0),
 		mode:    fileMode,
-		name:    string(fName),
 		size:    int64(fsize),
 		sys:     nil,
 	}
@@ -157,66 +171,4 @@ func parseMdEntry(entry []byte) (byte, OrfsStat, error) {
 	fmt.Printf("ParseMDEntry, Stat isdir: %v\n", f.IsDir())
 	return state, &f, nil
 
-}
-
-func (f *fsObj) ReadMD() error {
-	buf := make([]byte, 1024*1024*4) // should make this a loop and parse stuff as i go..
-	pos := uint64(0)
-
-	for {
-		n, err := f.fs.mdctx.Read(f.Inode().String(), buf, pos)
-		if err != nil {
-			fmt.Fprintf(f.fs.debuglog, "Failed to read inode: %v, error: %v\n", f.Inode().String(), err)
-			return err
-		}
-		mdEntries := strings.Split(string(buf[:n]), "\n")
-		for _, entry := range mdEntries {
-			status, stat, err := parseMdEntry([]byte(entry))
-			if err == MdEntryEmpty {
-				continue
-			} else {
-				fmt.Fprintf(f.fs.debuglog, "Failed to parse MD entry, entry: %v, error: %v\n", entry, err)
-			}
-			if status == '+' {
-				fmt.Fprintf(f.fs.debuglog, "Readdir on: %v, adding %v, isdir: %v\n", f.Inode().String(), stat.Name(), stat.IsDir())
-				if stat.IsDir() {
-					f.childDir[stat.Inode()] = &fsObj{
-						name:    stat.Name(),
-						size:    stat.Size(),
-						mode:    stat.Mode(),
-						modTime: stat.ModTime(),
-						isDir:   stat.IsDir(),
-						inode:   stat.Inode(),
-					}
-				} else {
-					f.childObj[stat.Inode()] = &fsObj{
-						name:    stat.Name(),
-						size:    stat.Size(),
-						mode:    stat.Mode(),
-						modTime: stat.ModTime(),
-						isDir:   stat.IsDir(),
-						inode:   stat.Inode(),
-					}
-				}
-			} else if status == '-' {
-				fmt.Fprintf(f.fs.debuglog, "Readdir on: %v, removing %v\n", f.Inode().String(), stat.Name())
-				if stat.IsDir() {
-					delete(f.childDir, stat.Inode())
-				} else {
-					delete(f.childObj, stat.Inode())
-				}
-			} else {
-				return fmt.Errorf("Weird status: %v for entry: %v\n", status, entry)
-			}
-		}
-		f.lastRead = time.Now()
-
-		if n == len(buf) {
-			pos += uint64(n)
-		} else {
-			break
-		}
-
-	}
-	return nil
 }
